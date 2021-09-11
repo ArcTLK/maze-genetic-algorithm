@@ -1,8 +1,19 @@
 import time
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
-@njit()
+# constants
+MOVE_LIMIT = 100
+POPULATION_SIZE = 2000000
+MUTATION_CHANCE = 0.01 # 1% chance at mutation
+# we need a "no move" operation for the case when the chromosome is already optimal
+# for example, if the chromosome succeeded in the most optimal moves say 40, 
+# the remaining 100 - 40 moves should be no moves
+GENE_MIN = 0
+GENE_MAX = 4
+MAX_GENERATIONS = 50
+
+@njit(parallel=True)
 def fitnessFunction(population):
     board = [
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
@@ -22,18 +33,19 @@ def fitnessFunction(population):
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     ]
+
     goalX = 14
     goalY = 10
-    fitness = np.empty((population.shape[0], 2))
 
-    i = 0
-    for chromosome in population:
+    fitness = np.empty(POPULATION_SIZE)
+
+    for j in prange(POPULATION_SIZE):
         penalties = 0
         steps = 0
         x = 1
         y = 1
 
-        for move in chromosome:
+        for move in population[j]:
             if move == 1:
                 if board[y - 1][x] == 1:
                     penalties += 1
@@ -91,89 +103,96 @@ def fitnessFunction(population):
                     break
 
         # penalty
-        penalty = 2
+        extra_penalty = 2
         if xLocked and yLocked:
-            penalty = 3
+            extra_penalty = 3
         elif x == goalX and yLocked:
-            penalty = 4
+            extra_penalty = 4
         elif y == goalY and xLocked:
-            penalty = 4
+            extra_penalty = 4
 
-        # minimize this score! tuple(score, moves)
-        fitness[i][0] = distance * penalty + penalties
-        fitness[i][1] = steps
-        i += 1
+        # minimize this score!
+        fitness[j] = distance * extra_penalty + penalties
     
     return fitness
 
-class GA():
-    MOVE_LIMIT = 100
-    POPULATION_SIZE = 100000
-    MUTATION_CHANCE = 0.1 # 10% chance at mutation
-    # we need a "no move" operation for the case when the chromosome is already optimal
-    # for example, if the chromosome succeeded in the most optimal moves say 40, 
-    # the remaining 100 - 40 moves should be no moves
-    GENES = [0, 1, 2, 3, 4]
-    MAX_GENERATIONS = 50
+@njit(parallel=True)
+def crossover(population):
+    newPopulation = np.empty((POPULATION_SIZE, MOVE_LIMIT))
 
-    def __init__(self):
-        self.generation = 1
+    # consider 25% fittest population
+    subset = population[:POPULATION_SIZE // 4]
+    subsetSize = subset.shape[0]
 
-        t = time.monotonic()
-        # create base population
-        self.population = np.random.randint(self.GENES[0], self.GENES[-1] + 1, (self.POPULATION_SIZE, self.MOVE_LIMIT))
-        self.getGenerationalBest(t)
+    # calculate randoms
+    rand_parents = np.random.randint(0, subsetSize, (POPULATION_SIZE, 2))
+    rand_points = np.random.randint(0, MOVE_LIMIT, POPULATION_SIZE)
+    rand_mutations = np.random.random(POPULATION_SIZE)
+    rand_mutation_points = np.random.randint(0, MOVE_LIMIT, POPULATION_SIZE)
+    rand_mutation_genes = np.random.randint(GENE_MIN, GENE_MAX + 1, POPULATION_SIZE)
 
+    for i in range(POPULATION_SIZE):
+        firstParent = subset[rand_parents[i][0]][:]
+        secondParent = subset[rand_parents[i][1]][:]
 
-        for i in range(1, self.MAX_GENERATIONS):
-            t = time.monotonic()
-            self.generation += 1
+        # select a random crossover point in the genespace
+        crossoverPoint = rand_points[i]
 
-            self.crossover()
-            self.getGenerationalBest(t)
+        newPopulation[i] = np.append(firstParent[:crossoverPoint], secondParent[crossoverPoint:])
 
-    # crossover applies on a subset of the population that are fittest
-    def crossover(self):
-        newPopulation = np.empty((self.POPULATION_SIZE, self.MOVE_LIMIT))
-        # sort population by fitness value then number of moves
-        fitness = fitnessFunction(self.population)
-        fitnessIndices = fitness.argsort(axis=0)
-        self.population = self.population[fitnessIndices.T[0]]
+        # mutate
+        if rand_mutations[i] < MUTATION_CHANCE:
+            newPopulation[i][rand_mutation_points[i]] = rand_mutation_genes[i]
+    
+    return newPopulation
 
-        # consider 25% fittest population
-        subset = self.population[:self.POPULATION_SIZE // 4]
-        subsetSize = subset.shape[0]
+@njit(parallel=True)
+def getRandomPopulation():
+    return np.random.randint(GENE_MIN, GENE_MAX + 1, (POPULATION_SIZE, MOVE_LIMIT))
 
-        # calculate randoms
-        rand_parents = np.random.randint(0, subsetSize, (self.POPULATION_SIZE, 2))
-        rand_points = np.random.randint(0, self.MOVE_LIMIT, self.POPULATION_SIZE)
-        rand_mutations = np.random.random(self.POPULATION_SIZE)
-        rand_mutation_points = np.random.randint(0, self.MOVE_LIMIT, self.POPULATION_SIZE)
-        rand_mutation_genes = np.random.randint(self.GENES[0], self.GENES[-1] + 1, self.POPULATION_SIZE)
+@njit()
+def sortUsingFitness(population):
+    fitness = fitnessFunction(population)
+    fitnessIndices = fitness.argsort()
 
-        for i in range(self.POPULATION_SIZE):
-            firstParent = subset[rand_parents[i][0]][:]
-            secondParent = subset[rand_parents[i][1]][:]
+    return (population[fitnessIndices], fitness, fitnessIndices)
 
-            # select a random crossover point in the genespace
-            crossoverPoint = rand_points[i]
+def printGenerationalBest(generation, best, fitness, fitnessIndices, startTime):
+    print('Generation {} Time taken - {}s'.format(generation, time.monotonic() - startTime))
+    
+    for i, item in enumerate(best):
+        moves = ''
+        for move in item.astype('int32'):
+            if move == 0:
+                moves += 'N'
+            elif move == 1:
+                moves += 'W'
+            elif move == 2:
+                moves += 'S'
+            elif move == 3:
+                moves += 'A'
+            elif move == 4:
+                moves += 'D'
 
-            newPopulation[i] = np.append(firstParent[:crossoverPoint], secondParent[crossoverPoint:])
-
-            # mutate
-            if rand_mutations[i] < self.MUTATION_CHANCE:
-                newPopulation[i][rand_mutation_points[i]] = rand_mutation_genes[i]
-        
-        self.population = newPopulation
-
-    def getGenerationalBest(self, startTime):
-        fitness = fitnessFunction(self.population)
-        fitnessIndices = fitness.argsort()[:3]
-        best = self.population[fitnessIndices]
-
-        print('Generation {} Time taken - {}s'.format(self.generation, time.monotonic() - startTime))
-        for i, item in enumerate(best):
-            print(item, '(Score: {})'.format(fitness[fitnessIndices[i]][0]))
+        print(moves, '(Score: {})'.format(int(fitness[fitnessIndices[i]])))
 
 if __name__ == '__main__':
-    GA()
+    generation = 1
+
+    t = time.monotonic()
+    # create base population
+    population = getRandomPopulation()
+
+    population, fitness, fitnessIndices = sortUsingFitness(population)
+    printGenerationalBest(generation, population[:3], fitness, fitnessIndices, t)
+
+
+    for i in range(1, MAX_GENERATIONS):
+        t = time.monotonic()
+        generation += 1
+
+        population = crossover(population)
+
+        population, fitness, fitnessIndices = sortUsingFitness(population)
+        printGenerationalBest(generation, population[:3], fitness, fitnessIndices, t)
+

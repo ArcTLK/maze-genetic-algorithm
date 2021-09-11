@@ -22,4 +22,4 @@ It contains some utility functions.
 It contains the genetic algorithm implementation using vanilla python. It lacks optimization but does work! Running the script starts the genetic algorithm from a random population sample, outputting the best 3 chromosomes for every generation.
 
 ### np_ga.py
-It is an incomplete attempt at using numpy to optimize the genetic algorithm.
+It contains the optimized (multithreaded) genetic algorithm implementation using numpy and numba. It runs around *5-10 times* faster while having *20 times the population size* of the ga.py script. It has one drawback that it does not consider the number of steps in the solution.
